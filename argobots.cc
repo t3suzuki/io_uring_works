@@ -7,8 +7,8 @@
 #include <stdlib.h>
 #include <assert.h>
 
-#define N_CORE (2)
-#define N_ULT_PER_CORE (4)
+#define N_CORE (8)
+#define N_ULT_PER_CORE (16)
 #define ULT_N_TH (N_CORE*N_ULT_PER_CORE)
 #define IO_URING_QD (N_ULT_PER_CORE*16)
 
