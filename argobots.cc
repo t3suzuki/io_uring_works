@@ -5,20 +5,19 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <assert.h>
 
 #define N_CORE (2)
-#define N_ULT_PER_CORE (2)
+#define N_ULT_PER_CORE (4)
 #define ULT_N_TH (N_CORE*N_ULT_PER_CORE)
 #define IO_URING_QD (N_ULT_PER_CORE*16)
-
-const char open_path[] = "/home/tomoya-s/mountpoint2/tomoya-s/dummy";
 
 static struct io_uring ring[N_CORE][128];
 static ABT_xstream abt_xstreams[N_CORE];
 static ABT_thread abt_threads[ULT_N_TH];
 static ABT_pool global_abt_pools[N_CORE];
 static int done_flag[N_CORE][IO_URING_QD];
-int fd;
+static int file_fd;
 
 typedef struct {
   int tid;
@@ -37,6 +36,7 @@ void __io_uring_check(int core_id)
   int i = 0;
   io_uring_for_each_cqe(&ring[core_id][0], head, cqe) {
     if (cqe->res > 0) {
+      //printf("%s %d\n", __func__, __LINE__);
       done_flag[core_id][cqe->user_data] = 1;
       i++;
     }
@@ -70,35 +70,37 @@ func(void *p)
     if (*arg->quit) {
       break;
     }
-    printf("%s %d %d\n", __func__, __LINE__, tid);
+    //printf("%s %d %d\n", __func__, __LINE__, tid);
 
     const size_t sz = 4096;
-    size_t pos = rand() % 1024;
+    size_t pos = (rand() % (1024 * 256)) * 4096ULL;
+    //size_t pos = 16;
     struct io_uring_sqe *sqe = io_uring_get_sqe(&ring[core_id][0]);
-    io_uring_prep_read(sqe, fd, buf, sz, pos);
+    io_uring_prep_read(sqe, file_fd, buf, sz, pos);
     int sqe_id = ((uint64_t)sqe - (uint64_t)ring[core_id][0].sq.sqes) / sizeof(struct io_uring_sqe);
     sqe->user_data = sqe_id;
     done_flag[core_id][sqe_id] = 0;
 
-    printf("%s %d %d\n", __func__, __LINE__, tid);
+    //printf("%s %d %d\n", __func__, __LINE__, tid);
     __io_uring_bottom(core_id, sqe_id);
-    printf("%s %d %d\n", __func__, __LINE__, tid);
+    //printf("%s %d %d\n", __func__, __LINE__, tid);
     count ++;
   }
   arg->count = count;
 }
 
 int
-main()
+main(int argc, char **argv)
 {
   int i;
   for (i=0; i<N_CORE; i++) {
     io_uring_queue_init(IO_URING_QD, &ring[i][0], 0);
   }
-  fd = open(open_path, O_RDONLY|O_DIRECT);
+  char *file_path = argv[1];
+  file_fd = open(file_path, O_RDONLY|O_DIRECT);
+  assert(file_fd > 0);
+  printf("Opened file: %s\n", file_path);
 
-  printf("%d\n", fd);
-  
   ABT_init(0, NULL);
   ABT_xstream_self(&abt_xstreams[0]);
   for (i=1; i<N_CORE; i++) {
@@ -154,5 +156,5 @@ main()
 
   double d_sec = (t2.tv_sec - t0.tv_sec) + (t2.tv_nsec - t0.tv_nsec) * 1e-9;
 
-  printf("%f %lu %f\n", d_sec, sum, sum / d_sec);
+  printf("%f %lu %f KIOPS\n", d_sec, sum, sum / d_sec / 1000.0);
 }
