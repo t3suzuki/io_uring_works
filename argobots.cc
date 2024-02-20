@@ -9,7 +9,7 @@
 
 #define TIME_SEC (10)
 
-#define N_CORE (4)
+#define N_CORE (2)
 #define N_ULT_PER_CORE (16)
 #define ULT_N_TH (N_CORE*N_ULT_PER_CORE)
 #define IO_URING_QD (N_ULT_PER_CORE*16)
@@ -49,7 +49,18 @@ void __io_uring_check2(int ring_id)
 static inline
 void __io_uring_bottom2(int ring_id, int sqe_id)
 {
+  /*
+  struct timespec t0, t1;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  */
   io_uring_submit(&ring[ring_id][0]);
+  /*
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  double diff_sec = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
+  if (diff_sec > 1e-5)
+    printf("%s %f\n", __func__, diff_sec);
+  */
+  
   while (1) {
     __io_uring_check2(ring_id);
     //printf("%s %d %d\n", __func__, __LINE__, sqe_id);
@@ -107,11 +118,13 @@ wfunc(void *p)
       break;
     }
     size_t pos = (sz * count) % (1ULL*1024*1024*1024);
-#if 1
+#if 0
     int ring_id = N_CORE;
     struct io_uring_sqe *sqe = io_uring_get_sqe(&ring[ring_id][0]);
+    assert(sqe);
     io_uring_prep_write(sqe, file_fd, buf, sz, pos);
     int sqe_id = ((uint64_t)sqe - (uint64_t)ring[ring_id][0].sq.sqes) / sizeof(struct io_uring_sqe);
+    //sqe->flags = 16; //#define REQ_F_FORCE_ASYNC
     sqe->user_data = sqe_id;
     done_flag[ring_id][sqe_id] = 0;
     //printf("%s %d %lu %d %lu\n", __func__, __LINE__, count, sqe_id, pos);
@@ -121,8 +134,10 @@ wfunc(void *p)
     size_t off;
     for (off=0; off<sz; off+=unit) {
       struct io_uring_sqe *sqe = io_uring_get_sqe(&ring[core_id][0]);
+      assert(sqe);
       io_uring_prep_write(sqe, file_fd, (char *)buf+off, unit, pos+off);
       int sqe_id = ((uint64_t)sqe - (uint64_t)ring[core_id][0].sq.sqes) / sizeof(struct io_uring_sqe);
+      //sqe->flags = 16; //#define REQ_F_FORCE_ASYNC
       sqe->user_data = sqe_id;
       done_flag[core_id][sqe_id] = 0;
     //printf("%s %d %lu %d %lu\n", __func__, __LINE__, count, sqe_id, pos);
