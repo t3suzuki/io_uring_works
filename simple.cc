@@ -6,11 +6,17 @@
 #include <liburing.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <time.h>
 
 #define QUEUE_DEPTH (128)
 #define N_IO (3)
-#define BUF_SIZE (4096)
-#define LEN (512)
+#define BUF_SIZE (1*1024*1024/16)
+#define LEN (BUF_SIZE)
+
+uint64_t myconv(struct timespec ts)
+{
+  return ts.tv_sec * 1e9 + ts.tv_nsec;
+}
 
 int
 main(int argc, char **argv)
@@ -52,7 +58,13 @@ main(int argc, char **argv)
   }
 
   // ---- submit read requests ----
+  struct timespec ts1, ts2;
+  clock_gettime(CLOCK_MONOTONIC, &ts1);
   ret = io_uring_submit(&ring);
+  clock_gettime(CLOCK_MONOTONIC, &ts2);
+  uint64_t diff = myconv(ts2) - myconv(ts1);
+  printf("%f us\n", diff / 1000.0 / 1000.0);
+  
 
   // ---- check completions ----
   struct io_uring_cqe *cqe;
