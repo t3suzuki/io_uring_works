@@ -27,6 +27,36 @@ typedef struct {
 } arg_t;
 
 
+static inline
+void __io_uring_check2(int core_id)
+{
+  struct io_uring_cqe *cqe;
+  unsigned head;
+  int i = 0;
+  io_uring_for_each_cqe(&ring[core_id][0], head, cqe) {
+    if (cqe->res > 0) {
+      //printf("%s %d %d\n", __func__, __LINE__, cqe->user_data);
+      done_flag[core_id][cqe->user_data] = 1;
+      i++;
+    }
+  }
+  if (i > 0)
+    io_uring_cq_advance(&ring[core_id][0], i);
+}
+
+static inline
+void __io_uring_bottom2(int core_id, int sqe_id)
+{
+  io_uring_submit(&ring[core_id][0]);
+  while (1) {
+    __io_uring_check2(core_id);
+    //printf("%s %d %d\n", __func__, __LINE__, sqe_id);
+    if (done_flag[core_id][sqe_id])
+      break;
+    ABT_thread_yield();
+  }
+}
+
 
 static inline
 void __io_uring_check(int core_id)
@@ -58,6 +88,37 @@ void __io_uring_bottom(int core_id, int sqe_id)
 }
 
 void
+wfunc(void *p)
+{
+  arg_t *arg = (arg_t *)p;
+  int core_id = arg->core_id;
+  void *buf;
+  const size_t sz = 512*1024*1024;
+  //const size_t sz = 128*1024;
+  //const size_t sz = 4*1024;
+  //printf("%s %d\n", __func__, __LINE__);
+  int ret = posix_memalign(&buf, sz, sz);
+  size_t count = 0;
+  //printf("%s %d %d\n", __func__, __LINE__, ret);
+  while (1) {
+    if (*arg->quit) {
+      break;
+    }
+    size_t pos = (sz * count) % (512*1024*1024);
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring[core_id][0]);
+    io_uring_prep_write(sqe, file_fd, buf, sz, pos);
+    int sqe_id = ((uint64_t)sqe - (uint64_t)ring[core_id][0].sq.sqes) / sizeof(struct io_uring_sqe);
+    sqe->user_data = sqe_id;
+    done_flag[core_id][sqe_id] = 0;
+    //printf("%s %d %lu %d %lu\n", __func__, __LINE__, count, sqe_id, pos);
+    __io_uring_bottom2(core_id, sqe_id);
+    count ++;
+  }
+  printf("%s %d\n", __func__, __LINE__);
+  
+}
+
+void
 func(void *p)
 {
   arg_t *arg = (arg_t *)p;
@@ -65,25 +126,21 @@ func(void *p)
   int core_id = arg->core_id;
   void *buf;
   size_t count = 0;
-  posix_memalign(&buf, 4096, 4096);
+  const size_t sz = 4096;
+  int ret = posix_memalign(&buf, sz, sz);
+  //printf("%s %d %d\n", __func__, __LINE__, ret);
   while (1) {
     if (*arg->quit) {
       break;
     }
-    //printf("%s %d %d\n", __func__, __LINE__, tid);
 
-    const size_t sz = 4096;
     size_t pos = (rand() % (1024 * 256)) * 4096ULL;
-    //size_t pos = 16;
     struct io_uring_sqe *sqe = io_uring_get_sqe(&ring[core_id][0]);
     io_uring_prep_read(sqe, file_fd, buf, sz, pos);
     int sqe_id = ((uint64_t)sqe - (uint64_t)ring[core_id][0].sq.sqes) / sizeof(struct io_uring_sqe);
     sqe->user_data = sqe_id;
     done_flag[core_id][sqe_id] = 0;
-
-    //printf("%s %d %d\n", __func__, __LINE__, tid);
     __io_uring_bottom(core_id, sqe_id);
-    //printf("%s %d %d\n", __func__, __LINE__, tid);
     count ++;
   }
   arg->count = count;
@@ -97,7 +154,7 @@ main(int argc, char **argv)
     io_uring_queue_init(IO_URING_QD, &ring[i][0], 0);
   }
   char *file_path = argv[1];
-  file_fd = open(file_path, O_RDONLY|O_DIRECT);
+  file_fd = open(file_path, O_RDWR|O_DIRECT);
   assert(file_fd > 0);
   printf("Opened file: %s\n", file_path);
 
@@ -132,6 +189,18 @@ main(int argc, char **argv)
     
   }
 
+  ABT_thread wth;
+  arg_t warg;
+  {
+    int core_id = 0;
+    warg.quit = &quit;
+    warg.core_id = core_id;
+    ABT_thread_create(global_abt_pools[core_id],
+		      (void (*)(void*))wfunc,
+		      &warg,
+		      ABT_THREAD_ATTR_NULL,
+		      &wth);
+  }
   struct timespec t1;
   clock_gettime(CLOCK_MONOTONIC, &t1);
   while (1) {
@@ -150,7 +219,9 @@ main(int argc, char **argv)
     ABT_thread_join(abt_threads[tid]);
     sum += args[tid].count;
   }
-
+  printf("%s %d\n", __func__, __LINE__);
+  ABT_thread_join(wth);
+  
   struct timespec t2;
   clock_gettime(CLOCK_MONOTONIC, &t2);
 
