@@ -7,12 +7,14 @@
 #include <stdlib.h>
 #include <assert.h>
 
-#define TIME_SEC (10)
+#define TIME_SEC (5)
 
 #define N_CORE (2)
-#define N_ULT_PER_CORE (16)
+#define N_ULT_PER_CORE (32)
 #define ULT_N_TH (N_CORE*N_ULT_PER_CORE)
 #define IO_URING_QD (N_ULT_PER_CORE*16)
+#define IO_URING_TH1 (4)
+#define IO_URING_TH2 (2)
 
 static struct io_uring ring[N_CORE+1][128];
 static ABT_xstream abt_xstreams[N_CORE+1];
@@ -20,6 +22,8 @@ static ABT_thread abt_threads[ULT_N_TH];
 static ABT_pool global_abt_pools[N_CORE+1];
 static int done_flag[N_CORE+1][IO_URING_QD];
 static int file_fd;
+static int pending_req[N_CORE][128];
+static int submit_cnt[N_CORE][128];
 
 typedef struct {
   int tid;
@@ -46,10 +50,40 @@ void __io_uring_check(int core_id)
     io_uring_cq_advance(&ring[core_id][0], i);
 }
 
+
+
 static inline
 void __io_uring_bottom(int core_id, int sqe_id)
 {
+#if 0
   io_uring_submit(&ring[core_id][0]);
+#else
+  int sub_cnt = -1;
+  if (pending_req[core_id][0] >= IO_URING_TH1) {
+    //printf("io_uring_submit %d\n", core_id);
+    io_uring_submit(&ring[core_id][0]);
+    pending_req[core_id][0] = 0;
+    submit_cnt[core_id][0] = (submit_cnt[core_id][0] + 1) % 65536;
+  } else {
+    pending_req[core_id][0]++;
+    sub_cnt = submit_cnt[core_id][0];
+    int i = 0;
+    while (1) {
+      if (sub_cnt != submit_cnt[core_id][0]) {
+	break;
+      }
+      if (i > IO_URING_TH2) {
+	//printf("io_uring_submit2 %d pend %d submitted %d\n", core_id, pending_req[core_id][0], submit_cnt[core_id][0]);
+	io_uring_submit(&ring[core_id][0]);
+	pending_req[core_id][0] = 0;
+	submit_cnt[core_id][0] = (submit_cnt[core_id][0] + 1) % 65536;
+	break;
+      }
+      ABT_thread_yield();
+      i++;
+    }
+  }
+#endif
   while (1) {
     __io_uring_check(core_id);
     if (done_flag[core_id][sqe_id])
@@ -65,12 +99,8 @@ wfunc(void *p)
   int core_id = arg->core_id;
   void *buf;
   const size_t sz = 2*1024*1024;
-  //const size_t sz = 128*1024;
-  //const size_t sz = 4*1024;
-  //printf("%s %d\n", __func__, __LINE__);
   int ret = posix_memalign(&buf, sz, sz);
   size_t count = 0;
-  //printf("%s %d %d\n", __func__, __LINE__, ret);
   while (1) {
     if (*arg->quit) {
       break;
@@ -82,10 +112,8 @@ wfunc(void *p)
     assert(sqe);
     io_uring_prep_write(sqe, file_fd, buf, sz, pos);
     int sqe_id = ((uint64_t)sqe - (uint64_t)ring[ring_id][0].sq.sqes) / sizeof(struct io_uring_sqe);
-    //sqe->flags = 16; //#define REQ_F_FORCE_ASYNC
     sqe->user_data = sqe_id;
     done_flag[ring_id][sqe_id] = 0;
-    //printf("%s %d %lu %d %lu\n", __func__, __LINE__, count, sqe_id, pos);
     __io_uring_bottom(ring_id, sqe_id);
 #else
     size_t unit = 32768;
@@ -95,10 +123,8 @@ wfunc(void *p)
       assert(sqe);
       io_uring_prep_write(sqe, file_fd, (char *)buf+off, unit, pos+off);
       int sqe_id = ((uint64_t)sqe - (uint64_t)ring[core_id][0].sq.sqes) / sizeof(struct io_uring_sqe);
-      //sqe->flags = 16; //#define REQ_F_FORCE_ASYNC
       sqe->user_data = sqe_id;
       done_flag[core_id][sqe_id] = 0;
-    //printf("%s %d %lu %d %lu\n", __func__, __LINE__, count, sqe_id, pos);
       __io_uring_bottom(core_id, sqe_id);
     }
 #endif
@@ -180,8 +206,9 @@ main(int argc, char **argv)
 
   ABT_thread wth;
   arg_t warg;
-  {
-    int core_id = N_CORE;
+  warg.count = 0;
+  if (0) {
+    int core_id = 0;
     warg.quit = &quit;
     warg.core_id = core_id;
     ABT_thread_create(global_abt_pools[core_id],

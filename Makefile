@@ -1,12 +1,13 @@
-all:
-	gcc -O3 two.cc -luring -fpermissive
-
 ABT_PATH=/home/tomoya-s/work/github/ppopp21-preemption-artifact/argobots/install
 PTHABT_PATH=/home/tomoya-s/mountpoint2/tomoya-s/pthabt/newlib
 
 arg:
 	gcc -O3 -g argobots.cc -I $(ABT_PATH)/include -L $(ABT_PATH)/lib -labt -lopcodes -luring
 #	gcc -O3 -g argobots.cc -I $(ABT_PATH)/include -L $(ABT_PATH)/lib -labt -lopcodes -L/home/tomoya-s/work/io_uring_works/liburing/install -luring
+
+
+two:
+	gcc -O3 two.cc -luring -fpermissive
 
 
 FLAGS += -O3
