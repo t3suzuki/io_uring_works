@@ -7,14 +7,14 @@
 #include <stdlib.h>
 #include <assert.h>
 
-#define TIME_SEC (5)
+#define TIME_SEC (10)
 
-#define N_CORE (2)
-#define N_ULT_PER_CORE (32)
+#define N_CORE (1)
+#define N_ULT_PER_CORE (512)
 #define ULT_N_TH (N_CORE*N_ULT_PER_CORE)
-#define IO_URING_QD (N_ULT_PER_CORE*16)
-#define IO_URING_TH1 (4)
-#define IO_URING_TH2 (2)
+#define IO_URING_QD (N_ULT_PER_CORE*4)
+#define IO_URING_TH1 (512)
+#define IO_URING_TH2 (0)
 
 static struct io_uring ring[N_CORE+1][128];
 static ABT_xstream abt_xstreams[N_CORE+1];
@@ -32,6 +32,7 @@ typedef struct {
   size_t count;
 } arg_t;
 
+int done = 0;
 
 static inline
 void __io_uring_check(int core_id)
@@ -151,12 +152,17 @@ func(void *p)
 
     size_t pos = (rand() % (1024 * 256)) * 4096ULL;
     struct io_uring_sqe *sqe = io_uring_get_sqe(&ring[core_id][0]);
-    io_uring_prep_read(sqe, file_fd, buf, sz, pos);
     int sqe_id = ((uint64_t)sqe - (uint64_t)ring[core_id][0].sq.sqes) / sizeof(struct io_uring_sqe);
+#if 1
+    io_uring_prep_read(sqe, file_fd, buf, sz, pos);
+#else
+    io_uring_prep_read_fixed(sqe, file_fd, buf, sz, pos, sqe_id);
+#endif
     sqe->user_data = sqe_id;
     done_flag[core_id][sqe_id] = 0;
     __io_uring_bottom(core_id, sqe_id);
     count ++;
+    done ++;
   }
   arg->count = count;
 }
@@ -165,8 +171,20 @@ int
 main(int argc, char **argv)
 {
   int i;
+  /*
+  struct rlimit rlim;
+  rlim.rlim_cur = RLIM_INFINITY;
+  rlim.rlim_max = RLIM_INFINITY;
+  setrlimit(RLIMIT_MEMLOCK, &rlim);
+  */
+  
   for (i=0; i<N_CORE+1; i++) {
     io_uring_queue_init(IO_URING_QD, &ring[i][0], 0);
+    //io_uring_queue_init(IO_URING_QD, &ring[i][0], IORING_SETUP_SQPOLL);
+    /*
+    return syscall(__NR_io_uring_register, s->ring_fd,
+		   IORING_REGISTER_BUFFERS, s->iovecs, roundup_pow2(depth));
+    */
   }
   char *file_path = argv[1];
   file_fd = open(file_path, O_RDWR|O_DIRECT);
@@ -218,11 +236,18 @@ main(int argc, char **argv)
 		      &wth);
   }
   struct timespec t1;
+  int th = 1;
+  int prev_done = 0;
   clock_gettime(CLOCK_MONOTONIC, &t1);
   while (1) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     double diff_sec = (now.tv_sec - t1.tv_sec) + (now.tv_nsec - t1.tv_nsec) * 1e-9;
+    if (diff_sec > th) {
+      printf("%d sec %d KIOPS\n", th, (done - prev_done)/ 1000);
+      prev_done = done;
+      th ++;
+    }
     if (diff_sec > TIME_SEC)
       break;
     ABT_thread_yield();
