@@ -30,48 +30,6 @@ typedef struct {
 
 
 static inline
-void __io_uring_check2(int ring_id)
-{
-  struct io_uring_cqe *cqe;
-  unsigned head;
-  int i = 0;
-  io_uring_for_each_cqe(&ring[ring_id][0], head, cqe) {
-    if (cqe->res > 0) {
-      //printf("%s %d %d\n", __func__, __LINE__, cqe->user_data);
-      done_flag[ring_id][cqe->user_data] = 1;
-      i++;
-    }
-  }
-  if (i > 0)
-    io_uring_cq_advance(&ring[ring_id][0], i);
-}
-
-static inline
-void __io_uring_bottom2(int ring_id, int sqe_id)
-{
-  /*
-  struct timespec t0, t1;
-  clock_gettime(CLOCK_MONOTONIC, &t0);
-  */
-  io_uring_submit(&ring[ring_id][0]);
-  /*
-  clock_gettime(CLOCK_MONOTONIC, &t1);
-  double diff_sec = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
-  if (diff_sec > 1e-5)
-    printf("%s %f\n", __func__, diff_sec);
-  */
-  
-  while (1) {
-    __io_uring_check2(ring_id);
-    //printf("%s %d %d\n", __func__, __LINE__, sqe_id);
-    if (done_flag[ring_id][sqe_id])
-      break;
-    ABT_thread_yield();
-  }
-}
-
-
-static inline
 void __io_uring_check(int core_id)
 {
   struct io_uring_cqe *cqe;
@@ -106,7 +64,7 @@ wfunc(void *p)
   arg_t *arg = (arg_t *)p;
   int core_id = arg->core_id;
   void *buf;
-  const size_t sz = 128*1024*1024;
+  const size_t sz = 2*1024*1024;
   //const size_t sz = 128*1024;
   //const size_t sz = 4*1024;
   //printf("%s %d\n", __func__, __LINE__);
@@ -128,7 +86,7 @@ wfunc(void *p)
     sqe->user_data = sqe_id;
     done_flag[ring_id][sqe_id] = 0;
     //printf("%s %d %lu %d %lu\n", __func__, __LINE__, count, sqe_id, pos);
-    __io_uring_bottom2(ring_id, sqe_id);
+    __io_uring_bottom(ring_id, sqe_id);
 #else
     size_t unit = 32768;
     size_t off;
@@ -141,7 +99,7 @@ wfunc(void *p)
       sqe->user_data = sqe_id;
       done_flag[core_id][sqe_id] = 0;
     //printf("%s %d %lu %d %lu\n", __func__, __LINE__, count, sqe_id, pos);
-      __io_uring_bottom2(core_id, sqe_id);
+      __io_uring_bottom(core_id, sqe_id);
     }
 #endif
     count ++;
