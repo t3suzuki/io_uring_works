@@ -315,7 +315,7 @@ main(int argc, char **argv)
     prev_done = done;
   }
 
+  quit = 1;
   pthread_join(pth, NULL);
   
-  quit = 1;
 }
