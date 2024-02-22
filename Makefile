@@ -1,8 +1,10 @@
 ABT_PATH=/home/tomoya-s/work/github/ppopp21-preemption-artifact/argobots/install
 PTHABT_PATH=/home/tomoya-s/mountpoint2/tomoya-s/pthabt/newlib
+LIBURING_PATH=/home/tomoya-s/work/io_uring_works/liburing/install
 
 arg:
-	gcc -O3 -g argobots.cc -I $(ABT_PATH)/include -L $(ABT_PATH)/lib -labt -lopcodes -luring
+#	gcc -O3 -g argobots.cc  -I $(ABT_PATH)/include -L $(ABT_PATH)/lib -labt -lopcodes -luring
+	gcc -O3 -g argobots.cc -I $(LIBURING_PATH)/include -I $(ABT_PATH)/include -L $(ABT_PATH)/lib -labt -lopcodes -L$(LIBURING_PATH)/lib -luring
 #	gcc -O3 -g argobots.cc -I $(ABT_PATH)/include -L $(ABT_PATH)/lib -labt -lopcodes -L/home/tomoya-s/work/io_uring_works/liburing/install -luring
 
 
