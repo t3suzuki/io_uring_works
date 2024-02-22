@@ -38,10 +38,10 @@
 #define TIME_SEC (10)
 
 #define N_CORE (1)
-#define N_ULT_PER_CORE (512)
+#define N_ULT_PER_CORE (256)
 #define ULT_N_TH (N_CORE*N_ULT_PER_CORE)
 #define IO_URING_QD (N_ULT_PER_CORE*2)
-#define IO_URING_TH1 (512)
+#define IO_URING_TH1 (256)
 #define IO_URING_TH2 (0)
 
 static struct io_uring ring[N_CORE][128];
