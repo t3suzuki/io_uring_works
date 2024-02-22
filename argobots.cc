@@ -6,21 +6,22 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <pthread.h>
 
 #define TIME_SEC (10)
 
 #define N_CORE (1)
 #define N_ULT_PER_CORE (512)
 #define ULT_N_TH (N_CORE*N_ULT_PER_CORE)
-#define IO_URING_QD (N_ULT_PER_CORE*4)
+#define IO_URING_QD (N_ULT_PER_CORE*8)
 #define IO_URING_TH1 (512)
 #define IO_URING_TH2 (0)
 
-static struct io_uring ring[N_CORE+1][128];
-static ABT_xstream abt_xstreams[N_CORE+1];
+static struct io_uring ring[N_CORE][128];
+static ABT_xstream abt_xstreams[N_CORE];
 static ABT_thread abt_threads[ULT_N_TH];
-static ABT_pool global_abt_pools[N_CORE+1];
-static int done_flag[N_CORE+1][IO_URING_QD];
+static ABT_pool global_abt_pools[N_CORE];
+static int done_flag[N_CORE][IO_URING_QD];
 static int file_fd;
 static int pending_req[N_CORE][128];
 static int submit_cnt[N_CORE][128];
@@ -40,6 +41,7 @@ void __io_uring_check(int core_id)
   struct io_uring_cqe *cqe;
   unsigned head;
   int i = 0;
+#if 1
   io_uring_for_each_cqe(&ring[core_id][0], head, cqe) {
     if (cqe->res > 0) {
       //printf("%s %d\n", __func__, __LINE__);
@@ -49,15 +51,53 @@ void __io_uring_check(int core_id)
   }
   if (i > 0)
     io_uring_cq_advance(&ring[core_id][0], i);
+#else
+  {
+    struct io_uring *r = (struct io_uring *)(ring[core_id]);
+    struct io_uring_cq *cring = &r->cq;
+	struct io_uring_cqe *cqe;
+	unsigned head, reaped = 0;
+	int last_idx = -1, stat_nr = 0;
+
+	head = *cring->khead;
+	do {
+
+		if (head == *cring->ktail)
+		  break;
+		//printf("%s %d\n", __func__, __LINE__);
+		cqe = &cring->cqes[head & *cring->kring_mask];
+		{
+		  int index = cqe->user_data & 0xffffffff;
+
+		  if (cqe->res > 0) {
+		    //printf("res %d index %d head %d\n", cqe->res, index, head);
+		  } else {
+		    assert(0);
+		  }
+		  done_flag[0][index] = 1;
+		}
+		reaped++;
+		head++;
+	} while (1);
+
+	if (reaped) {
+	  *cring->khead = head;
+	}
+  }
+#endif
 }
 
+#include <fcntl.h>
 
 
 static inline
 void __io_uring_bottom(int core_id, int sqe_id)
 {
-#if 0
-  io_uring_submit(&ring[core_id][0]);
+#if 1
+  *ring[core_id][0].sq.ktail = ring[core_id][0].sq.sqe_tail;
+  syscall(__NR_io_uring_enter, ring[core_id][0].enter_ring_fd, 1, 0, 0, NULL, 0);
+
+  //io_uring_submit(&ring[core_id][0]);
 #else
   int sub_cnt = -1;
   if (pending_req[core_id][0] >= IO_URING_TH1) {
@@ -151,6 +191,7 @@ func(void *p)
     }
 
     size_t pos = (rand() % (1024 * 256)) * 4096ULL;
+    //printf("%s %d\n", __func__, __LINE__);
     struct io_uring_sqe *sqe = io_uring_get_sqe(&ring[core_id][0]);
     int sqe_id = ((uint64_t)sqe - (uint64_t)ring[core_id][0].sq.sqes) / sizeof(struct io_uring_sqe);
 #if 1
@@ -167,41 +208,22 @@ func(void *p)
   arg->count = count;
 }
 
-int
-main(int argc, char **argv)
+void
+run(void *arg)
 {
   int i;
-  /*
-  struct rlimit rlim;
-  rlim.rlim_cur = RLIM_INFINITY;
-  rlim.rlim_max = RLIM_INFINITY;
-  setrlimit(RLIMIT_MEMLOCK, &rlim);
-  */
-  
-  for (i=0; i<N_CORE+1; i++) {
-    io_uring_queue_init(IO_URING_QD, &ring[i][0], 0);
-    //io_uring_queue_init(IO_URING_QD, &ring[i][0], IORING_SETUP_SQPOLL);
-    /*
-    return syscall(__NR_io_uring_register, s->ring_fd,
-		   IORING_REGISTER_BUFFERS, s->iovecs, roundup_pow2(depth));
-    */
-  }
-  char *file_path = argv[1];
-  file_fd = open(file_path, O_RDWR|O_DIRECT);
-  assert(file_fd > 0);
-  printf("Opened file: %s\n", file_path);
-
+  volatile int *quit = (volatile int *)arg;
+    
   ABT_init(0, NULL);
   ABT_xstream_self(&abt_xstreams[0]);
-  for (i=1; i<N_CORE+1; i++) {
+  for (i=1; i<N_CORE; i++) {
     ABT_xstream_create(ABT_SCHED_NULL, &abt_xstreams[i]);
   }
-  for (i=0; i<N_CORE+1; i++) {
+  for (i=0; i<N_CORE; i++) {
     ABT_xstream_set_cpubind(abt_xstreams[i], i);
     ABT_xstream_get_main_pools(abt_xstreams[i], 1, &global_abt_pools[i]);
   }
 
-  volatile int quit = 0;
   ABT_thread abt_threads[ULT_N_TH];
   int tid;
   arg_t args[ULT_N_TH];
@@ -213,7 +235,7 @@ main(int argc, char **argv)
     int core_id = tid % N_CORE;
     args[tid].tid = tid;
     args[tid].core_id = core_id;
-    args[tid].quit = &quit;
+    args[tid].quit = quit;
     int ret = ABT_thread_create(global_abt_pools[core_id],
 				(void (*)(void*))func,
 				&args[tid],
@@ -224,10 +246,11 @@ main(int argc, char **argv)
 
   ABT_thread wth;
   arg_t warg;
+  int use_wfunc = 0;
   warg.count = 0;
-  if (0) {
+  if (use_wfunc) {
     int core_id = 0;
-    warg.quit = &quit;
+    warg.quit = quit;
     warg.core_id = core_id;
     ABT_thread_create(global_abt_pools[core_id],
 		      (void (*)(void*))wfunc,
@@ -235,33 +258,15 @@ main(int argc, char **argv)
 		      ABT_THREAD_ATTR_NULL,
 		      &wth);
   }
-  struct timespec t1;
-  int th = 1;
-  int prev_done = 0;
-  clock_gettime(CLOCK_MONOTONIC, &t1);
-  while (1) {
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    double diff_sec = (now.tv_sec - t1.tv_sec) + (now.tv_nsec - t1.tv_nsec) * 1e-9;
-    if (diff_sec > th) {
-      printf("%d sec %d KIOPS\n", th, (done - prev_done)/ 1000);
-      prev_done = done;
-      th ++;
-    }
-    if (diff_sec > TIME_SEC)
-      break;
-    ABT_thread_yield();
-  }
-  
-  quit = 1;
+
 
   size_t sum = 0;
   for (tid=0; tid<ULT_N_TH; tid++) {
     ABT_thread_join(abt_threads[tid]);
     sum += args[tid].count;
   }
-  printf("%s %d\n", __func__, __LINE__);
-  ABT_thread_join(wth);
+  if (use_wfunc)
+    ABT_thread_join(wth);
   
   struct timespec t2;
   clock_gettime(CLOCK_MONOTONIC, &t2);
@@ -270,4 +275,47 @@ main(int argc, char **argv)
 
   printf("%f %lu %f KIOPS\n", d_sec, sum, sum / d_sec / 1000.0);
   printf("write count %lu\n", warg.count);
+  
+}
+
+
+int
+main(int argc, char **argv)
+{
+  int i;
+  /*
+  struct rlimit rlim;
+  rlim.rlim_cur = RLIM_INFINITY;
+  rlim.rlim_max = RLIM_INFINITY;
+  setrlimit(RLIMIT_MEMLOCK, &rlim);
+  */
+  
+  for (i=0; i<N_CORE; i++) {
+    io_uring_queue_init(IO_URING_QD, &ring[i][0], 0);
+    //printf("%s %d\n", __func__, __LINE__);
+    //io_uring_queue_init(IO_URING_QD, &ring[i][0], IORING_SETUP_SQPOLL);
+    /*
+    return syscall(__NR_io_uring_register, s->ring_fd,
+		   IORING_REGISTER_BUFFERS, s->iovecs, roundup_pow2(depth));
+    */
+  }
+  char *file_path = argv[1];
+  file_fd = open(file_path, O_RDWR|O_DIRECT);
+  assert(file_fd > 0);
+  printf("Opened file: %s\n", file_path);
+
+  volatile int quit = 0;
+  pthread_t pth;
+  pthread_create(&pth, NULL,  (void* (*)(void*))run, (void*)&quit);
+
+  int prev_done = 0;
+  for (i=0; i<TIME_SEC; i++) {
+    sleep(1);
+    printf("%d sec %d KIOPS\n", i, (done - prev_done)/ 1000);
+    prev_done = done;
+  }
+
+  pthread_join(pth, NULL);
+  
+  quit = 1;
 }
