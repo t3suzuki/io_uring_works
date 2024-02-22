@@ -27,13 +27,14 @@
 
 #include <abt.h>
 #include <time.h>
-#include <liburing.h>
+#include <liburing.h> // ver 2.5
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <assert.h>
 #include <pthread.h>
+#include <fcntl.h>
 
 #define TIME_SEC (10)
 
@@ -70,53 +71,16 @@ void __io_uring_check(int core_id)
   struct io_uring_cqe *cqe;
   unsigned head;
   int i = 0;
-#if 1
   io_uring_for_each_cqe(&ring[core_id][0], head, cqe) {
     if (cqe->res > 0) {
-      //printf("%s %d\n", __func__, __LINE__);
       done_flag[core_id][cqe->user_data] = 1;
       i++;
     }
   }
   if (i > 0)
     io_uring_cq_advance(&ring[core_id][0], i);
-#else
-  {
-    struct io_uring *r = (struct io_uring *)(ring[core_id]);
-    struct io_uring_cq *cring = &r->cq;
-	struct io_uring_cqe *cqe;
-	unsigned head, reaped = 0;
-	int last_idx = -1, stat_nr = 0;
-
-	head = *cring->khead;
-	do {
-
-		if (head == *cring->ktail)
-		  break;
-		//printf("%s %d\n", __func__, __LINE__);
-		cqe = &cring->cqes[head & *cring->kring_mask];
-		{
-		  int index = cqe->user_data & 0xffffffff;
-
-		  if (cqe->res > 0) {
-		    //printf("res %d index %d head %d\n", cqe->res, index, head);
-		  } else {
-		    assert(0);
-		  }
-		  done_flag[0][index] = 1;
-		}
-		reaped++;
-		head++;
-	} while (1);
-
-	if (reaped) {
-	  *cring->khead = head;
-	}
-  }
-#endif
 }
 
-#include <fcntl.h>
 
 inline void iouring_enter(int core_id, int submit)
 {
@@ -129,12 +93,9 @@ void __io_uring_bottom(int core_id, int sqe_id)
 {
 #if 0
   iouring_enter(core_id, 1);
-  //io_uring_submit(&ring[core_id][0]);
 #else
   int sub_cnt = -1;
   if (pending_req[core_id][0] >= IO_URING_TH1) {
-    //printf("io_uring_submit %d\n", core_id);
-    //io_uring_submit(&ring[core_id][0]);
     iouring_enter(core_id, pending_req[core_id][0]);
     pending_req[core_id][0] = 0;
     submit_cnt[core_id][0] = (submit_cnt[core_id][0] + 1) % 65536;
@@ -147,8 +108,6 @@ void __io_uring_bottom(int core_id, int sqe_id)
 	break;
       }
       if (i > IO_URING_TH2) {
-	//printf("io_uring_submit2 %d pend %d submitted %d\n", core_id, pending_req[core_id][0], submit_cnt[core_id][0]);
-	//io_uring_submit(&ring[core_id][0]);
 	iouring_enter(core_id, pending_req[core_id][0]);
 	pending_req[core_id][0] = 0;
 	submit_cnt[core_id][0] = (submit_cnt[core_id][0] + 1) % 65536;
@@ -218,14 +177,12 @@ func(void *p)
   size_t count = 0;
   const size_t sz = 4096;
   int ret = posix_memalign(&buf, sz, sz);
-  //printf("%s %d %d\n", __func__, __LINE__, ret);
   while (1) {
     if (*arg->quit) {
       break;
     }
 
     size_t pos = (rand() % (1024 * 256)) * 4096ULL;
-    //printf("%s %d\n", __func__, __LINE__);
     struct io_uring_sqe *sqe = io_uring_get_sqe(&ring[core_id][0]);
     int sqe_id = ((uint64_t)sqe - (uint64_t)ring[core_id][0].sq.sqes) / sizeof(struct io_uring_sqe);
 #if USE_FIXED
@@ -348,7 +305,6 @@ main(int argc, char **argv)
       iovecs[i][j].iov_base = buf;
       iovecs[i][j].iov_len = 4096;
     }
-    //printf("%s %d\n", __func__, __LINE__);
     //io_uring_queue_init(IO_URING_QD, &ring[i][0], IORING_SETUP_SQPOLL);
     syscall(__NR_io_uring_register, ring[i][0].ring_fd,
 	    IORING_REGISTER_BUFFERS, iovecs[i], IO_URING_QD);
