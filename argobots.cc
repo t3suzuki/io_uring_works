@@ -1,3 +1,30 @@
+#include <stdio.h>
+#include <errno.h>
+#include <assert.h>
+#include <stdlib.h>
+#include <stddef.h>
+#include <signal.h>
+#include <inttypes.h>
+#include <math.h>
+
+#define USE_FIXED (1)
+
+#include <numa.h>
+
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
+#include <sys/resource.h>
+#include <sys/mman.h>
+#include <sys/uio.h>
+#include <linux/fs.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <string.h>
+#include <pthread.h>
+#include <sched.h>
+
 #include <abt.h>
 #include <time.h>
 #include <liburing.h>
@@ -13,7 +40,7 @@
 #define N_CORE (1)
 #define N_ULT_PER_CORE (512)
 #define ULT_N_TH (N_CORE*N_ULT_PER_CORE)
-#define IO_URING_QD (N_ULT_PER_CORE*8)
+#define IO_URING_QD (N_ULT_PER_CORE*2)
 #define IO_URING_TH1 (512)
 #define IO_URING_TH2 (0)
 
@@ -25,6 +52,8 @@ static int done_flag[N_CORE][IO_URING_QD];
 static int file_fd;
 static int pending_req[N_CORE][128];
 static int submit_cnt[N_CORE][128];
+
+static struct iovec iovecs[N_CORE][IO_URING_QD];
 
 typedef struct {
   int tid;
@@ -89,20 +118,24 @@ void __io_uring_check(int core_id)
 
 #include <fcntl.h>
 
+inline void iouring_enter(int core_id, int submit)
+{
+  *ring[core_id][0].sq.ktail = ring[core_id][0].sq.sqe_tail;
+  syscall(__NR_io_uring_enter, ring[core_id][0].enter_ring_fd, submit, 0, 0, NULL, 0);
+}
 
 static inline
 void __io_uring_bottom(int core_id, int sqe_id)
 {
-#if 1
-  *ring[core_id][0].sq.ktail = ring[core_id][0].sq.sqe_tail;
-  syscall(__NR_io_uring_enter, ring[core_id][0].enter_ring_fd, 1, 0, 0, NULL, 0);
-
+#if 0
+  iouring_enter(core_id, 1);
   //io_uring_submit(&ring[core_id][0]);
 #else
   int sub_cnt = -1;
   if (pending_req[core_id][0] >= IO_URING_TH1) {
     //printf("io_uring_submit %d\n", core_id);
-    io_uring_submit(&ring[core_id][0]);
+    //io_uring_submit(&ring[core_id][0]);
+    iouring_enter(core_id, pending_req[core_id][0]);
     pending_req[core_id][0] = 0;
     submit_cnt[core_id][0] = (submit_cnt[core_id][0] + 1) % 65536;
   } else {
@@ -115,7 +148,8 @@ void __io_uring_bottom(int core_id, int sqe_id)
       }
       if (i > IO_URING_TH2) {
 	//printf("io_uring_submit2 %d pend %d submitted %d\n", core_id, pending_req[core_id][0], submit_cnt[core_id][0]);
-	io_uring_submit(&ring[core_id][0]);
+	//io_uring_submit(&ring[core_id][0]);
+	iouring_enter(core_id, pending_req[core_id][0]);
 	pending_req[core_id][0] = 0;
 	submit_cnt[core_id][0] = (submit_cnt[core_id][0] + 1) % 65536;
 	break;
@@ -194,10 +228,10 @@ func(void *p)
     //printf("%s %d\n", __func__, __LINE__);
     struct io_uring_sqe *sqe = io_uring_get_sqe(&ring[core_id][0]);
     int sqe_id = ((uint64_t)sqe - (uint64_t)ring[core_id][0].sq.sqes) / sizeof(struct io_uring_sqe);
-#if 1
-    io_uring_prep_read(sqe, file_fd, buf, sz, pos);
+#if USE_FIXED
+    io_uring_prep_read_fixed(sqe, file_fd, iovecs[core_id][sqe_id].iov_base, sz, pos, sqe_id);
 #else
-    io_uring_prep_read_fixed(sqe, file_fd, buf, sz, pos, sqe_id);
+    io_uring_prep_read(sqe, file_fd, buf, sz, pos);
 #endif
     sqe->user_data = sqe_id;
     done_flag[core_id][sqe_id] = 0;
@@ -278,26 +312,47 @@ run(void *arg)
   
 }
 
+static void *allocate_mem(int size)
+{
+	void *buf;
+
+	if (posix_memalign(&buf, size, size)) {
+		printf("failed alloc\n");
+		return NULL;
+	}
+
+	return buf;
+}
 
 int
 main(int argc, char **argv)
 {
   int i;
-  /*
+
+#if USE_FIXED
   struct rlimit rlim;
   rlim.rlim_cur = RLIM_INFINITY;
   rlim.rlim_max = RLIM_INFINITY;
   setrlimit(RLIMIT_MEMLOCK, &rlim);
-  */
+#endif
   
   for (i=0; i<N_CORE; i++) {
     io_uring_queue_init(IO_URING_QD, &ring[i][0], 0);
+#if USE_FIXED
+    int j;
+    for (j = 0; j < IO_URING_QD; j++) {
+      void *buf;
+      buf = allocate_mem(4096);
+      if (!buf)
+	return -1;
+      iovecs[i][j].iov_base = buf;
+      iovecs[i][j].iov_len = 4096;
+    }
     //printf("%s %d\n", __func__, __LINE__);
     //io_uring_queue_init(IO_URING_QD, &ring[i][0], IORING_SETUP_SQPOLL);
-    /*
-    return syscall(__NR_io_uring_register, s->ring_fd,
-		   IORING_REGISTER_BUFFERS, s->iovecs, roundup_pow2(depth));
-    */
+    syscall(__NR_io_uring_register, ring[i][0].ring_fd,
+	    IORING_REGISTER_BUFFERS, iovecs[i], IO_URING_QD);
+#endif
   }
   char *file_path = argv[1];
   file_fd = open(file_path, O_RDWR|O_DIRECT);
